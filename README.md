@@ -1,6 +1,21 @@
 # e2e-cyber-bench
 
-Dataset: https://huggingface.co/datasets/sunblaze-ucb/e2e-cyber-bench
+Data: https://huggingface.co/datasets/sunblaze-ucb/e2e-cyber-bench
+
+```
+pip install "huggingface_hub[cli]"
+export HF_TOKEN=hf_....
+```
+
+Download it in the data/ folder:
+```
+hf download sunblaze-ucb/e2e-cyber-bench --local-dir data/projects/ # download all projects
+hf download sunblaze-ucb/e2e-cyber-bench --local-dir data/projects/ --include "curl/" # download specific project
+```
+Upload your project data to huggingfaco
+```
+hf upload sunblaze-ucb/e2e-cyber-bench data/projects/curl/ curl/
+```
 
 Default base builder: gcr.io/oss-fuzz-base/base-builder@sha256:8eda74a11e800aead5a041ee479a65b33dab3150d6e89e5694e2b6eb27be98fc
 
