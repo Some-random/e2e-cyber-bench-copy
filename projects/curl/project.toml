@@ -1,0 +1,5 @@
+name = "curl"
+language = "c"
+homepage = "https://curl.se/"
+main_repo = "https://github.com/curl/curl.git"
+repo_to_patch = "curl"
