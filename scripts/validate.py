@@ -23,8 +23,17 @@ def exec_run_checked(container_id, command, description, timeout=600):
     print(f"Running: {description}")
 
     # Use docker exec to run the command
-    cmd = ["docker", "exec", container_id, "bash", "-c", command]
-    result = subprocess.run(cmd, text=True, timeout=timeout)
+    cmd = [
+        "docker",
+        "exec",
+        container_id,
+        "timeout",
+        str(timeout),
+        "bash",
+        "-c",
+        command,
+    ]
+    result = subprocess.run(cmd, text=True, timeout=timeout + 10)
 
     if result.returncode != 0:
         raise Exception(f"{description} failed (exit code {result.returncode})")
@@ -114,8 +123,8 @@ Examples:
         # Load config.toml and project.toml
         config_toml_path = script_path / "config.toml"
         project_toml_path = script_path / "../project.toml"
-        config = tomli.loads(config_toml_path.read_text())
-        config["metadata"] = tomli.loads(project_toml_path.read_text())
+        config = tomli.loads(project_toml_path.read_text())
+        config.update(tomli.loads(config_toml_path.read_text()))
 
         # Extract source tarball
         exec_run_checked(
@@ -130,17 +139,17 @@ Examples:
 
         # Apply patch if requested
         if args.apply_patch:
+            repo_path = "/src/" + config["repo_to_patch"]
             exec_run_checked(
-                container_id, "bash -eux /src/patch.sh", "Running patch.sh"
+                container_id,
+                f"cd {repo_path} && git apply /src/patch.diff",
+                "Applying patch",
             )
 
         # Run compile.sh
         exec_run_checked(
             container_id, "bash -eux /src/compile.sh", "Running compile.sh"
         )
-
-        # Run test.sh
-        exec_run_checked(container_id, "bash -eux /src/test.sh", "Running test.sh")
 
         # Run poc
         target_prog = config["target_prog"]
@@ -157,6 +166,11 @@ Examples:
                 f'bash -c "/out/{target_prog} /src/poc.bin || exit 0 && exit 1"',
                 "Running PoC",
             )
+
+        # Run test.sh
+        exec_run_checked(
+            container_id, "bash -eux /src/test.sh", "Running test.sh", timeout=1800
+        )
 
         print("\n✓ Validation completed successfully!")
 
