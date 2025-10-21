@@ -17,7 +17,9 @@ Upload your project data to huggingfaco
 hf upload sunblaze-ucb/e2e-cyber-bench data/projects/curl/ curl/
 ```
 
-Default base builder: gcr.io/oss-fuzz-base/base-builder@sha256:8eda74a11e800aead5a041ee479a65b33dab3150d6e89e5694e2b6eb27be98fc
+Default build image: gcr.io/oss-fuzz-base/base-builder@sha256:8eda74a11e800aead5a041ee479a65b33dab3150d6e89e5694e2b6eb27be98fc (24.04)
+Alternative build_image: gcr.io/oss-fuzz-base/base-builder@sha256:fba1033c6a64433642ab97b6ea987ddaa9938e06596c6cace1c786130fc1461b (20.04)
+Set build_image = "gcr.io/oss-fuzz-base/base-builder@sha256:" in project.toml or config.toml to overwrite the default build image.
 
 File structure:
 
