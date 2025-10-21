@@ -87,9 +87,9 @@ Examples:
     )
 
     parser.add_argument(
-        "--build-image",
+        "--default-build-image",
         default="gcr.io/oss-fuzz-base/base-builder@sha256:8eda74a11e800aead5a041ee479a65b33dab3150d6e89e5694e2b6eb27be98fc",
-        help="Docker build image to use",
+        help="Default Docker build image to use",
     )
 
     args = parser.parse_args()
@@ -101,9 +101,17 @@ Examples:
     container_id = None
 
     try:
+        # Load config.toml and project.toml
+        script_path = Path(args.script_dir) / args.task_path
+        config_toml_path = script_path / "config.toml"
+        project_toml_path = script_path / "../project.toml"
+        config = tomli.loads(project_toml_path.read_text())
+        config.update(tomli.loads(config_toml_path.read_text()))
+
         # Start Docker container
-        print(f"Starting Docker container from image: {args.build_image}")
-        cmd = ["docker", "run", "-d", args.build_image, "tail", "-f", "/dev/null"]
+        build_image = config.get("build_image", args.default_build_image)
+        print(f"Starting Docker container from image: {build_image}")
+        cmd = ["docker", "run", "-d", build_image, "tail", "-f", "/dev/null"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         container_id = result.stdout.strip()
         print(f"Container ID: {container_id[:12]}")
@@ -115,16 +123,9 @@ Examples:
             copy_dir_to_container(container_id, data_path, "/src")
 
         # Copy script files to container
-        script_path = Path(args.script_dir) / args.task_path
         print(f"Copying scripts from {script_path} to container:/src")
         if script_path.exists():
             copy_dir_to_container(container_id, script_path, "/src")
-
-        # Load config.toml and project.toml
-        config_toml_path = script_path / "config.toml"
-        project_toml_path = script_path / "../project.toml"
-        config = tomli.loads(project_toml_path.read_text())
-        config.update(tomli.loads(config_toml_path.read_text()))
 
         # Extract source tarball
         exec_run_checked(
