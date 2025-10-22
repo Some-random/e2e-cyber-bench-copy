@@ -3,3 +3,4 @@ language = "c"
 homepage = "https://curl.se/"
 main_repo = "https://github.com/curl/curl.git"
 repo_to_patch = "curl" # used to find the directory to patch
+immutable_files = ["tests/"] # the directories or files that shouldn't be modified, relative to the repo_to_patch directory
