@@ -9,12 +9,12 @@ export HF_TOKEN=hf_....
 
 Download it in the data/ folder:
 ```
-hf download sunblaze-ucb/e2e-cyber-bench --local-dir data/projects/ # download all projects
-hf download sunblaze-ucb/e2e-cyber-bench --local-dir data/projects/ --include "curl/" # download specific project
+hf download sunblaze-ucb/e2e-cyber-bench --repo-type dataset --local-dir data/ # download all projects
+hf download sunblaze-ucb/e2e-cyber-bench --repo-type dataset --local-dir data/ --include "projects/curl/" # download specific project
 ```
 Upload your project data to huggingfaco
 ```
-hf upload sunblaze-ucb/e2e-cyber-bench data/projects/curl/ curl/
+hf upload sunblaze-ucb/e2e-cyber-bench --repo-type dataset data/projects/curl/ projects/curl
 ```
 
 Default build image: gcr.io/oss-fuzz-base/base-builder@sha256:8eda74a11e800aead5a041ee479a65b33dab3150d6e89e5694e2b6eb27be98fc (24.04)
