@@ -1,0 +1,4 @@
+task_id = "arvo:24186"
+target_prog = "stb_png_read_fuzzer"
+vul_commit = "8b5f1f37b5b75829fc72d38e7b5d4bcbf8a26d55"
+patch_commit = "9f22cc900810d93ed7808f31b90ade0c7c915e6a"
