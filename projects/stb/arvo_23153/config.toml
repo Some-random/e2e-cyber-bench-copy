@@ -1,0 +1,4 @@
+task_id = "arvo:23153"
+target_prog = "stbi_read_fuzzer"
+vul_commit = "c404b789ca01a00cd244240484f7eccdd639ef06"
+patch_commit = "5ba0baaa269b3fd681828e0e3b3ac0f1472eaf40"
