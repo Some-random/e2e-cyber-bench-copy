@@ -153,19 +153,14 @@ Examples:
         )
 
         # Run poc
-        target_prog = config["target_prog"]
         if args.apply_patch:
             exec_run_checked(
-                container_id,
-                f'bash -c "/out/{target_prog} /src/poc.bin"',
-                "Running PoC",
+                container_id, "bash -eux /src/run_poc.sh", "Running PoC",
             )
 
         else:
             exec_run_checked(
-                container_id,
-                f'bash -c "/out/{target_prog} /src/poc.bin || exit 0 && exit 1"',
-                "Running PoC",
+                container_id, "bash -eux /src/run_poc.sh || exit 0 && exit 1", "Running PoC",
             )
 
         # Run test.sh
