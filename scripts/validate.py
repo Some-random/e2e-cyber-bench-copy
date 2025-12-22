@@ -61,6 +61,12 @@ Examples:
     )
 
     parser.add_argument(
+        "--patch-file",
+        default=None,
+        help="Path to external patch file to apply (instead of default patch.diff)",
+    )
+
+    parser.add_argument(
         "--run-prepare",
         action="store_true",
         default=False,
@@ -139,13 +145,34 @@ Examples:
             )
 
         # Apply patch if requested
-        if args.apply_patch:
+        if args.apply_patch or args.patch_file:
             repo_path = "/src/" + config["repo_to_patch"]
-            exec_run_checked(
-                container_id,
-                f"cd {repo_path} && git apply /src/patch.diff",
-                "Applying patch",
-            )
+            if args.patch_file:
+                # Copy custom patch file to container
+                patch_path = Path(args.patch_file).absolute()
+                print(f"Copying custom patch from {patch_path} to container:/src/custom.patch")
+                cmd = ["docker", "cp", str(patch_path), f"{container_id}:/src/custom.patch"]
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+                patch_file = "/src/custom.patch"
+            else:
+                patch_file = "/src/patch.diff"
+
+            # Try applying patch with different strip levels (-p1, -p2, -p3)
+            # This handles cases where agent generates patches with extra directory prefixes
+            patch_applied = False
+            for strip_level in [1, 2, 3]:
+                try:
+                    exec_run_checked(
+                        container_id,
+                        f"cd {repo_path} && git apply -p{strip_level} {patch_file}",
+                        f"Applying patch (strip level {strip_level})",
+                    )
+                    patch_applied = True
+                    break
+                except Exception as e:
+                    if strip_level == 3:
+                        raise Exception(f"Failed to apply patch with strip levels 1-3: {e}")
+                    print(f"  Strip level {strip_level} failed, trying next...")
 
         # Run compile.sh
         exec_run_checked(
@@ -153,12 +180,14 @@ Examples:
         )
 
         # Run poc
-        if args.apply_patch:
+        if args.apply_patch or args.patch_file:
+            # Patched version: expect PoC to NOT crash
             exec_run_checked(
                 container_id, "bash -eux /src/run_poc.sh", "Running PoC",
             )
 
         else:
+            # Vulnerable version: expect PoC to crash
             exec_run_checked(
                 container_id, "bash -eux /src/run_poc.sh || exit 0 && exit 1", "Running PoC",
             )

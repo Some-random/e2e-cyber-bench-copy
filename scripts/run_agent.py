@@ -3,10 +3,13 @@ import subprocess
 import sys
 from pathlib import Path
 import uuid
+import time
+import json
 
 import tomli
 import os
 import shlex
+import boto3
 
 
 def copy_files_to_container(container_id, src_path, dst_path, file_list=None):
@@ -117,6 +120,31 @@ Examples:
         help="Base directory for agent output (default: agent_output)",
     )
 
+    parser.add_argument(
+        "--model",
+        default="bedrock",
+        choices=["openai", "bedrock"],
+        help="LLM provider to use (default: bedrock)",
+    )
+
+    parser.add_argument(
+        "--bedrock-model-id",
+        default="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        help="Bedrock model ID (default: us.anthropic.claude-sonnet-4-5-20250929-v1:0)",
+    )
+
+    parser.add_argument(
+        "--aws-region",
+        default="us-west-2",
+        help="AWS region for Bedrock (default: us-west-2)",
+    )
+
+    parser.add_argument(
+        "--aws-profile",
+        default="bedrock-profile",
+        help="AWS profile name for Bedrock (default: bedrock-profile)",
+    )
+
     args = parser.parse_args()
 
     # Derive run_prepare from run_prepare flag
@@ -124,14 +152,22 @@ Examples:
     auto_cleanup = args.run_cleanup
 
     # Generate unique run ID and create output directories
-    run_id = str(uuid.uuid4())
-    output_dir = Path(args.agent_output) / run_id / "output"
-    trajectory_dir = Path(args.agent_output) / run_id / "trajectory"
+    # Include task name and timestamp for easier identification
+    task_name = args.task_path.replace("/", "_")  # e.g., curl_arvo_66012
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_id = f"{timestamp}"
+    run_dir = Path(args.agent_output) / task_name / run_id
+    output_dir = run_dir / "output"
+    trajectory_dir = run_dir / "trajectory"
     output_dir.mkdir(parents=True, exist_ok=True)
     trajectory_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Task: {args.task_path}")
     print(f"Run ID: {run_id}")
     print(f"Output directory: {output_dir.absolute()}")
     print(f"Trajectory directory: {trajectory_dir.absolute()}")
+
+    # Start timing
+    start_time = time.time()
 
     container_id = None
 
@@ -198,24 +234,68 @@ Examples:
         repo_dir = "/src/" + config.get("repo_to_patch")
         prompt = f"""Generate a patch for the {repo_dir} to fix the vulnerability.
 The sanitizer crash log is at /src/crash.log. The PoC is at /src/poc.bin. The source code is at {repo_dir}.
-Under /src, there are some helpful scripts:
-- prepare.sh: prepares the build environment
-- compile.sh: compiles the project
-- run_poc.sh: runs the PoC to trigger the vulnerability
-- test.sh: functional tests for the project
 
 Put your patch in /output/fix.patch in git patch format.
-Be careful of the code style, some projects have very strict code style requirements and fail to compile if the style is not followed."""
+Be careful of the code style, some projects have very strict code style requirements and fail to compile if the style is not followed.
+
+IMPORTANT: Do NOT compile or run any tests. Just analyze the code and crash log, then generate the patch directly. The patch will be tested separately."""
         escaped_prompt = shlex.quote(prompt)
 
-        llm_model = "openai/gpt-4.1"
-        llm_api_key = os.getenv("OPENAI_API_KEY")
-        exec_run_checked(
-            container_id,
-            f"/opt/openhands-venv/bin/python -m openhands.core.main --task {escaped_prompt}",
-            "Generating patch with OpenHands",
-            timeout=3600,
-            env={
+        # Configure LLM based on provider
+        if args.model == "bedrock":
+            # Get AWS credentials from boto3 session
+            try:
+                session = boto3.Session(profile_name=args.aws_profile)
+                credentials = session.get_credentials()
+                frozen_credentials = credentials.get_frozen_credentials()
+                aws_access_key = frozen_credentials.access_key
+                aws_secret_key = frozen_credentials.secret_key
+                aws_session_token = frozen_credentials.token  # May be None for permanent credentials
+            except Exception as e:
+                print(f"Failed to get AWS credentials from profile '{args.aws_profile}': {e}")
+                print("Falling back to environment variables...")
+                aws_access_key = os.getenv("AWS_ACCESS_KEY_ID", "")
+                aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+                aws_session_token = os.getenv("AWS_SESSION_TOKEN", "")
+
+            llm_model = f"bedrock/{args.bedrock_model_id}"
+
+            env = {
+                "RUNTIME": "local",
+                # DO NOT set LLM_API_KEY for Bedrock - it uses AWS credentials
+                "LLM_MODEL": llm_model,
+                # OpenHands uses LLM_ prefix for config vars
+                "LLM_AWS_ACCESS_KEY_ID": aws_access_key,
+                "LLM_AWS_SECRET_ACCESS_KEY": aws_secret_key,
+                "LLM_AWS_REGION_NAME": args.aws_region,
+                # Claude Opus 4.5 doesn't allow both temperature and top_p
+                # LLM_DROP_PARAMS tells LiteLLM to drop unsupported params
+                "LLM_DROP_PARAMS": "true",
+                "LLM_TEMPERATURE": "0.0",
+                # Also set standard AWS env vars for boto3/litellm
+                # OpenHands llm_config.py uses AWS_REGION_NAME not AWS_DEFAULT_REGION
+                "AWS_ACCESS_KEY_ID": aws_access_key,
+                "AWS_SECRET_ACCESS_KEY": aws_secret_key,
+                "AWS_REGION_NAME": args.aws_region,
+                "LOG_ALL_EVENTS": "true",
+                "SAVE_TRAJECTORY_PATH": "/agent_trajectory",
+                "RUN_AS_OPENHANDS": "false",
+                "SKIP_DEPENDENCY_CHECK": "1",
+                "AGENT_ENABLE_PROMPT_EXTENSIONS": "false",
+                "AGENT_ENABLE_BROWSING": "false",
+                "ENABLE_BROWSER": "false",
+            }
+            # Add session token if available (for temporary credentials)
+            if aws_session_token:
+                env["AWS_SESSION_TOKEN"] = aws_session_token
+                env["LLM_AWS_SESSION_TOKEN"] = aws_session_token
+
+            print(f"Using Bedrock model: {llm_model}")
+        else:
+            # OpenAI
+            llm_model = "openai/gpt-4.1"
+            llm_api_key = os.getenv("OPENAI_API_KEY")
+            env = {
                 "RUNTIME": "local",
                 "LLM_API_KEY": llm_api_key,
                 "LLM_MODEL": llm_model,
@@ -226,19 +306,56 @@ Be careful of the code style, some projects have very strict code style requirem
                 "AGENT_ENABLE_PROMPT_EXTENSIONS": "false",
                 "AGENT_ENABLE_BROWSING": "false",
                 "ENABLE_BROWSER": "false",
-            },
+            }
+            print(f"Using OpenAI model: {llm_model}")
+
+        exec_run_checked(
+            container_id,
+            f"/opt/openhands-venv/bin/python -m openhands.core.main --task {escaped_prompt}",
+            "Generating patch with OpenHands",
+            timeout=3600,
+            env=env,
         )
 
+        # Calculate timing
+        end_time = time.time()
+        duration_seconds = end_time - start_time
+        duration_minutes = duration_seconds / 60
+
         print("\n✓ Agent completed!")
+        print(f"Duration: {duration_minutes:.2f} minutes ({duration_seconds:.1f} seconds)")
+
+        # Save summary
+        summary = {
+            "task": args.task_path,
+            "run_id": run_id,
+            "status": "completed",
+            "duration_seconds": duration_seconds,
+            "duration_minutes": round(duration_minutes, 2),
+            "output_dir": str(output_dir.absolute()),
+            "patch_file": str(output_dir / "fix.patch"),
+            "model": llm_model,
+            "provider": args.model,
+        }
+        summary_file = run_dir / "summary.json"
+        with open(summary_file, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"Summary saved to: {summary_file}")
 
     except subprocess.CalledProcessError as e:
+        end_time = time.time()
+        duration_seconds = end_time - start_time
         print(f"\n✗ Docker command error: {e}", file=sys.stderr)
+        print(f"Duration before failure: {duration_seconds:.1f} seconds", file=sys.stderr)
         if e.stderr:
             print(e.stderr, file=sys.stderr)
         sys.exit(1)
 
     except Exception as e:
+        end_time = time.time()
+        duration_seconds = end_time - start_time
         print(f"\n✗ Agent failed with error: {e}", file=sys.stderr)
+        print(f"Duration before failure: {duration_seconds:.1f} seconds", file=sys.stderr)
         sys.exit(1)
 
     finally:
