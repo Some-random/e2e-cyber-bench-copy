@@ -63,3 +63,8 @@ build.sh  curl  curl_fuzzer  nghttp2  openssl  zlib
 python3 scripts/validate.py --run-prepare --run-cleanup curl/arvo_66012
 python3 scripts/validate.py --run-prepare --run-cleanup --apply-patch curl/arvo_66012
 ```
+
+```bash
+# run agent
+python3 scripts/run_agent.py --run-prepare --run-cleanup curl/arvo_66012
+```
