@@ -117,7 +117,11 @@ Examples:
         # Start Docker container
         build_image = config.get("build_image", args.default_build_image)
         print(f"Starting Docker container from image: {build_image}")
-        cmd = ["docker", "run", "-d", build_image, "tail", "-f", "/dev/null"]
+        cmd = [
+            "docker", "run", "-d",
+            "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
+            build_image, "tail", "-f", "/dev/null"
+        ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         container_id = result.stdout.strip()
         print(f"Container ID: {container_id[:12]}")

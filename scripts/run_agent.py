@@ -186,6 +186,7 @@ Examples:
             "docker",
             "run",
             "-d",
+            "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
             "-v",
             f"{output_dir.absolute()}:/output",
             "-v",
