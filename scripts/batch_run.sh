@@ -1,184 +1,194 @@
 #!/bin/bash
 
-# Batch run agent and test patches in parallel
-# Usage: ./scripts/batch_run.sh
+# Batch run agent on multiple tasks
+# Usage: ./scripts/batch_run.sh [--mode patch-only|e2e] [--max-attempts N]
 
-# 10 tasks with smallest patches that have run_poc.sh (26-33 lines)
 TASKS=(
-    "fluent-bit/arvo_27279"    # 26 lines
-    "fluent-bit/arvo_27025"    # 27 lines
-    "fluent-bit/arvo_26593"    # 28 lines
-    "fluent-bit/arvo_28265"    # 29 lines
-    "fluent-bit/arvo_51132"    # 29 lines
-    "fluent-bit/arvo_27710"    # 30 lines
-    "fluent-bit/arvo_30090"    # 30 lines
-    "fluent-bit/arvo_33750"    # 33 lines
-    "fluent-bit/arvo_34116"    # 33 lines
-    "fluent-bit/arvo_46082"    # 33 lines
+    "capstone/arvo_13466"
+    "capstone/arvo_13467"
+    "capstone/arvo_14912"
+    "capstone/arvo_58666"
+    "curl/arvo_66012"
+    "faad2/arvo_58287"
+    "flatbuffers/arvo_46883"
+    "fluent-bit/arvo_26325"
+    "fluent-bit/arvo_26327"
+    "fluent-bit/arvo_26345"
+    "fluent-bit/arvo_26593"
+    "fluent-bit/arvo_27025"
+    "fluent-bit/arvo_27241"
+    "fluent-bit/arvo_27279"
+    "fluent-bit/arvo_27710"
+    "fluent-bit/arvo_28265"
+    "fluent-bit/arvo_30090"
+    "fluent-bit/arvo_33750"
+    "fluent-bit/arvo_34116"
+    "fluent-bit/arvo_45879"
+    "fluent-bit/arvo_46082"
+    "fluent-bit/arvo_51132"
+    "hiredis/arvo_28777"
+    "libidn2/arvo_12420"
+    "libpcap/arvo_48863"
+    "libssh2/arvo_29769"
+    "libssh2/arvo_65212"
+    "md4c/arvo_31332"
+    "skcms/arvo_6521"
+    "wasm3/arvo_33318"
 )
 
-TOTAL=${#TASKS[@]}
-RESULTS_DIR="batch_results_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$RESULTS_DIR"
+# Defaults
+MODE=${MODE:-"e2e"}
+MAX_ATTEMPTS=${MAX_ATTEMPTS:-3}
+MAX_PARALLEL=${MAX_PARALLEL:-2}
+MAX_RETRIES=${MAX_RETRIES:-2}
+RETRY_DELAY=${RETRY_DELAY:-60}
+STAGGER_DELAY=${STAGGER_DELAY:-10}
+MODEL_ID=${MODEL_ID:-"us.anthropic.claude-sonnet-4-5-20250929-v1:0"}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --mode) MODE="$2"; shift 2 ;;
+        --max-attempts) MAX_ATTEMPTS="$2"; shift 2 ;;
+        --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
+        --model) MODEL_ID="$2"; shift 2 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+echo "========================================"
+echo "Mode: $MODE | Attempts: $MAX_ATTEMPTS | Parallel: $MAX_PARALLEL"
+echo "Model: $MODEL_ID"
+echo "Tasks: ${#TASKS[@]}"
+echo "========================================"
 
 START_TIME=$(date +%s)
-echo "Starting batch run at $(date)"
-echo "Results directory: $RESULTS_DIR"
-echo "Processing $TOTAL tasks in parallel..."
-echo ""
+BATCH_ID="$$_$(date +%s)"
 
-# Function to run a single task
 run_task() {
-    local task="$1"
-    local task_id="$2"
+    local task=$1
     local task_name=$(echo "$task" | tr '/' '_')
-    local log_file="$RESULTS_DIR/${task_name}.log"
-    local result_file="$RESULTS_DIR/${task_name}.result"
+    local tmp_log="/tmp/batch_${BATCH_ID}_${task_name}.log"
+    local run_dir_file="/tmp/batch_${BATCH_ID}_${task_name}.rundir"
+    echo "[$task] Starting..."
 
-    local task_start=$(date +%s)
-    echo "[$task_id/$TOTAL] Starting: $task" | tee -a "$log_file"
+    # Run and capture the run directory from output
+    python3 scripts/run_agent.py \
+        --mode "$MODE" \
+        --max-attempts "$MAX_ATTEMPTS" \
+        --bedrock-model-id "$MODEL_ID" \
+        "$task" > "$tmp_log" 2>&1
 
-    # Run agent
-    local agent_start=$(date +%s)
-    python3 scripts/run_agent.py --run-prepare --run-cleanup "$task" >> "$log_file" 2>&1
-    local agent_status=$?
-    local agent_end=$(date +%s)
-    local agent_duration=$((agent_end - agent_start))
-
-    if [ $agent_status -ne 0 ]; then
-        echo "AGENT_FAILED|$task|$agent_duration|0|0" > "$result_file"
-        echo "[$task_id/$TOTAL] Agent FAILED: $task (${agent_duration}s)" | tee -a "$log_file"
-        return
+    # Extract run directory from the output (look for "Output:" line)
+    local run_dir=$(grep "^Output:" "$tmp_log" | head -1 | sed 's/Output: //' | xargs dirname)
+    if [ -z "$run_dir" ] || [ ! -d "$run_dir" ]; then
+        # Fallback to latest directory
+        run_dir=$(ls -td agent_output/${task_name}/*/ 2>/dev/null | head -1)
     fi
 
-    # Find patch file
-    local latest_run=$(ls -t "agent_output/$task_name" 2>/dev/null | head -1)
-    local patch_file="agent_output/$task_name/$latest_run/output/fix.patch"
-
-    if [ ! -f "$patch_file" ]; then
-        echo "AGENT_NO_PATCH|$task|$agent_duration|0|0" > "$result_file"
-        echo "[$task_id/$TOTAL] No patch: $task (${agent_duration}s)" | tee -a "$log_file"
-        return
+    if [ -n "$run_dir" ] && [ -d "$run_dir" ]; then
+        mv "$tmp_log" "${run_dir}/run.log"
+        # Save run_dir for final summary
+        echo "$run_dir" > "$run_dir_file"
     fi
 
-    # Test patch
-    local test_start=$(date +%s)
-    python3 scripts/validate.py --run-prepare --run-cleanup --patch-file "$patch_file" "$task" >> "$log_file" 2>&1
-    local test_status=$?
-    local test_end=$(date +%s)
-    local test_duration=$((test_end - test_start))
-
-    local total_duration=$((test_end - task_start))
-
-    if [ $test_status -eq 0 ]; then
-        echo "SUCCESS|$task|$agent_duration|$test_duration|$total_duration" > "$result_file"
-        echo "[$task_id/$TOTAL] SUCCESS: $task (agent: ${agent_duration}s, test: ${test_duration}s)" | tee -a "$log_file"
+    local summary_file="${run_dir}/summary.json"
+    if [ -f "$summary_file" ]; then
+        python3 -c "
+import json
+with open('$summary_file') as f:
+    d = json.load(f)
+status = d.get('status', 'error')
+duration = d.get('duration_minutes', 0)
+attempts = d.get('attempts', [])
+parts = []
+for a in attempts:
+    s1 = a.get('stage1', '-')
+    s2 = a.get('stage2', '-')
+    s3 = a.get('stage3', '-')
+    parts.append(f'A{a[\"attempt\"]}[{s1}/{s2}/{s3}]')
+print(f'[$task] {status.upper()} ({duration:.1f}m) {\" \".join(parts)}')
+print(f'  Logs: ${run_dir}/run.log')
+"
     else
-        echo "TEST_FAILED|$task|$agent_duration|$test_duration|$total_duration" > "$result_file"
-        echo "[$task_id/$TOTAL] Test FAILED: $task (agent: ${agent_duration}s, test: ${test_duration}s)" | tee -a "$log_file"
+        echo "[$task] NO RESULT (log: $tmp_log)"
     fi
 }
 
-# Limit concurrent tasks to avoid Bedrock rate limiting
-# Claude Opus 4.5 has strict token quotas
-MAX_CONCURRENT=${MAX_CONCURRENT:-2}
-STAGGER_DELAY=${STAGGER_DELAY:-10}  # seconds between launches
-
-echo "Running with max $MAX_CONCURRENT concurrent tasks..."
+# Run tasks in parallel
 echo ""
-
 PIDS=()
 for i in "${!TASKS[@]}"; do
-    # Wait if we've reached max concurrent
-    while [ ${#PIDS[@]} -ge $MAX_CONCURRENT ]; do
-        # Remove finished PIDs
+    while [ ${#PIDS[@]} -ge $MAX_PARALLEL ]; do
         NEW_PIDS=()
         for pid in "${PIDS[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
-                NEW_PIDS+=("$pid")
-            fi
+            kill -0 "$pid" 2>/dev/null && NEW_PIDS+=("$pid")
         done
         PIDS=("${NEW_PIDS[@]}")
-
-        if [ ${#PIDS[@]} -ge $MAX_CONCURRENT ]; then
-            sleep 10
-        fi
+        [ ${#PIDS[@]} -ge $MAX_PARALLEL ] && sleep 5
     done
 
-    run_task "${TASKS[$i]}" "$((i+1))" &
+    run_task "${TASKS[$i]}" &
     PIDS+=($!)
-    echo "  Started task $((i+1))/${#TASKS[@]}, ${#PIDS[@]} running..."
-
-    # Small delay between launches
     sleep $STAGGER_DELAY
 done
 
-echo "All tasks launched. Waiting for remaining to complete..."
-echo ""
+for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null; done
 
-# Wait for all remaining tasks
-for pid in "${PIDS[@]}"; do
-    wait "$pid" 2>/dev/null
-done
-
+# Display results by reading from saved run directories
 END_TIME=$(date +%s)
-TOTAL_DURATION=$((END_TIME - START_TIME))
+DURATION=$((END_TIME - START_TIME))
 
 echo ""
-echo "========================================"
-echo "BATCH COMPLETE"
-echo "========================================"
-echo "Total time: $((TOTAL_DURATION / 60)) min $((TOTAL_DURATION % 60)) sec"
-echo ""
+echo "=== RESULTS ==="
+success=0; failed=0; errors=0
 
-# Collect and display results
-AGENT_SUCCESS=0
-TEST_SUCCESS=0
-AGENT_FAILED=0
-
-echo "Results:"
-echo "--------"
 for task in "${TASKS[@]}"; do
     task_name=$(echo "$task" | tr '/' '_')
-    result_file="$RESULTS_DIR/${task_name}.result"
+    run_dir_file="/tmp/batch_${BATCH_ID}_${task_name}.rundir"
 
-    if [ -f "$result_file" ]; then
-        result=$(cat "$result_file")
-        status=$(echo "$result" | cut -d'|' -f1)
-        agent_time=$(echo "$result" | cut -d'|' -f3)
-        test_time=$(echo "$result" | cut -d'|' -f4)
+    # Use saved run directory, fallback to latest
+    if [ -f "$run_dir_file" ]; then
+        run_dir=$(cat "$run_dir_file")
+        rm -f "$run_dir_file"
+    else
+        run_dir=$(ls -td agent_output/${task_name}/*/ 2>/dev/null | head -1)
+    fi
 
+    summary_file="${run_dir}/summary.json"
+
+    if [ -f "$summary_file" ]; then
+        python3 << EOF
+import json
+with open('$summary_file') as f:
+    d = json.load(f)
+status = d.get('status', 'error')
+duration = d.get('duration_minutes', 0)
+attempts = d.get('attempts', [])
+
+print(f"$task: {status.upper()} ({duration:.1f}m)")
+for a in attempts:
+    parts = []
+    if a.get('stage1') is not None:
+        parts.append(f"S1={a['stage1']}")
+    if a.get('stage2') is not None:
+        parts.append(f"S2={a['stage2']}")
+    parts.append(f"S3={a.get('stage3', 'N/A')}")
+    result = "SUCCESS" if a.get('success') else "FAILED"
+    print(f"  Attempt {a['attempt']}: {' '.join(parts)} -> {result}")
+EOF
+        status=$(python3 -c "import json; print(json.load(open('$summary_file'))['status'])")
         case "$status" in
-            SUCCESS)
-                echo "✓ $task - FIXED (agent: ${agent_time}s, test: ${test_time}s)"
-                AGENT_SUCCESS=$((AGENT_SUCCESS + 1))
-                TEST_SUCCESS=$((TEST_SUCCESS + 1))
-                ;;
-            TEST_FAILED)
-                echo "✗ $task - patch didn't fix (agent: ${agent_time}s, test: ${test_time}s)"
-                AGENT_SUCCESS=$((AGENT_SUCCESS + 1))
-                ;;
-            AGENT_FAILED)
-                echo "✗ $task - agent failed (${agent_time}s)"
-                AGENT_FAILED=$((AGENT_FAILED + 1))
-                ;;
-            AGENT_NO_PATCH)
-                echo "✗ $task - no patch generated (${agent_time}s)"
-                AGENT_FAILED=$((AGENT_FAILED + 1))
-                ;;
+            success) success=$((success + 1)) ;;
+            failed) failed=$((failed + 1)) ;;
+            *) errors=$((errors + 1)) ;;
         esac
     else
-        echo "? $task - no result file"
+        echo "$task: NO RESULT"
+        errors=$((errors + 1))
     fi
 done
 
 echo ""
-echo "========================================"
-echo "SUMMARY"
-echo "========================================"
-echo "Total tasks:    $TOTAL"
-echo "Agent success:  $AGENT_SUCCESS/$TOTAL"
-echo "Tests passed:   $TEST_SUCCESS/$TOTAL"
-echo "Total time:     $((TOTAL_DURATION / 60)) min $((TOTAL_DURATION % 60)) sec"
-echo "Results dir:    $RESULTS_DIR"
-echo "========================================"
+echo "=== SUMMARY ==="
+echo "Total: ${#TASKS[@]} | Success: $success | Failed: $failed | Error: $errors"
+echo "Duration: $((DURATION / 60))m $((DURATION % 60))s"
