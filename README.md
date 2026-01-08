@@ -14,7 +14,7 @@ Unlike existing benchmarks that provide crash logs or vulnerability hints, E2E-C
 2. **Generate** proof-of-concept inputs that trigger the bug
 3. **Patch** the vulnerability correctly without breaking tests
 
-**Results:** Claude Sonnet 4 (200K context) achieves ~5% end-to-end success rate on all tasks. With program slicing, this improves to ~7%.
+**Current Results:** Claude Sonnet 4 (200K context) achieves ~5% end-to-end success rate on all tasks. With program slicing, this improves to ~7%.
 
 ## File Structure
 
