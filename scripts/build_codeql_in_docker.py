@@ -37,8 +37,8 @@ DEFAULT_BUILD_IMAGE = "gcr.io/oss-fuzz-base/base-builder:latest"
 # Maximum depth for call graph traversal (to limit output size)
 MAX_CALL_DEPTH = 3
 
-# Maximum output size in bytes (100KB)
-MAX_OUTPUT_SIZE = 100 * 1024
+# Maximum output size in bytes (150KB - reasonable for LLM context)
+MAX_OUTPUT_SIZE = 150 * 1024
 
 # Risky function patterns - prioritize these in output
 RISKY_PATTERNS = [
@@ -52,7 +52,8 @@ RISKY_PATTERNS = [
 ]
 
 # CodeQL query: Find functions reachable within MAX_CALL_DEPTH levels.
-# Also marks functions as "risky" if they contain dangerous operations.
+# Query returns function name, file, start/end lines, and depth.
+# Risky detection is done in Python based on function name and body.
 CALL_GRAPH_QUERY = """
 /**
  * @name Call graph from fuzzer entry point (depth-limited)
@@ -79,22 +80,6 @@ predicate reachableAtDepth(Function entry, Function target, int depth) {
   )
 }
 
-predicate reachable(Function entry, Function target) {
-  reachableAtDepth(entry, target, _)
-}
-
-// Check if function contains risky operations
-predicate hasRiskyOperation(Function f) {
-  exists(FunctionCall fc |
-    fc.getEnclosingFunction() = f and
-    fc.getTarget().getName().regexpMatch("(?i).*(memcpy|strcpy|malloc|free|parse|decode|buffer|alloc|copy|read|recv).*")
-  )
-  or
-  exists(ArrayExpr ae | ae.getEnclosingFunction() = f)
-  or
-  exists(PointerDereferenceExpr pde | pde.getEnclosingFunction() = f)
-}
-
 from Function entry, Function target, int depth
 where
   entry.getName() = "LLVMFuzzerTestOneInput"
@@ -108,8 +93,7 @@ select
   target.getFile().getAbsolutePath() as file_path,
   target.getLocation().getStartLine() as start_line,
   target.getBlock().getLocation().getEndLine() as end_line,
-  depth,
-  hasRiskyOperation(target) as is_risky
+  depth
 """.replace("MAX_DEPTH", str(MAX_CALL_DEPTH))
 
 
@@ -279,12 +263,12 @@ def run_slicing(src_dir, db_path, output_file, path_remap_from, path_remap_to):
             'file': file_path,
             'start': r.get('start_line', 0),
             'depth': r.get('depth', 0),
-            'is_risky': r.get('is_risky', False),
+            'is_risky': False,  # Will be set based on name/body patterns
         }
 
-        # Also check name against RISKY_PATTERNS
+        # Check function name against RISKY_PATTERNS
         name_lower = func_info['name'].lower()
-        if func_info['is_risky'] or any(p in name_lower for p in RISKY_PATTERNS):
+        if any(p in name_lower for p in RISKY_PATTERNS):
             func_info['is_risky'] = True
             risky_funcs.append(func_info)
         else:
@@ -322,55 +306,69 @@ def run_slicing(src_dir, db_path, output_file, path_remap_from, path_remap_to):
     skipped_funcs = 0
     seen = set()
 
-    # Group by file for cleaner output
-    funcs_by_file = defaultdict(list)
-    for f in all_funcs:
-        key = (f['file'], f['name'], f['start'])
-        if key not in seen:
-            seen.add(key)
-            funcs_by_file[f['file']].append(f)
+    # Process functions in priority order (risky by depth, then normal by depth)
+    # Extract function bodies and check size limit per-function
+    included = []  # List of (func_info, body, start, end)
 
-    # Process files, checking size limit
-    for file_path in sorted(funcs_by_file.keys()):
-        if str(harness) == file_path:
+    for func in all_funcs:
+        key = (func['file'], func['name'], func['start'])
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Skip harness file - already included
+        if str(harness) == func['file']:
             continue
 
-        funcs = sorted(funcs_by_file[file_path], key=lambda x: (not x['is_risky'], x['start']))
+        body, start, end = extract_function_lines(func['file'], func['start'])
+        if not body:
+            continue
+
+        # Estimate size of this function's output
+        marker = " [RISKY]" if func['is_risky'] else ""
+        func_header = f"\n// Lines {start}-{end}: {func['name']}{marker} (depth={func['depth']})\n"
+        func_size = len(func_header) + len(body)
+
+        # Check size limit
+        if current_size + func_size > MAX_OUTPUT_SIZE:
+            skipped_funcs += 1
+            continue
+
+        current_size += func_size
+        total_lines += end - start
+        included_funcs += 1
+        included.append((func, body, start, end))
+
+    # Group included functions by file for cleaner output
+    funcs_by_file = defaultdict(list)
+    for func, body, start, end in included:
+        funcs_by_file[func['file']].append((func, body, start, end))
+
+    # Output grouped by file
+    for file_path in sorted(funcs_by_file.keys()):
+        funcs = funcs_by_file[file_path]
 
         try:
             rel_path = Path(file_path).relative_to(src_dir)
         except ValueError:
             rel_path = Path(file_path).name
 
-        file_output = []
-        file_output.append("")
-        file_output.append("-" * 70)
-        risky_names = [f['name'] for f in funcs if f['is_risky']]
-        normal_names = [f['name'] for f in funcs if not f['is_risky']]
-        file_output.append(f"FILE: {rel_path}")
+        output.append("")
+        output.append("-" * 70)
+        risky_names = [f['name'] for f, _, _, _ in funcs if f['is_risky']]
+        normal_names = [f['name'] for f, _, _, _ in funcs if not f['is_risky']]
+        output.append(f"FILE: {rel_path}")
         if risky_names:
-            file_output.append(f"RISKY: {', '.join(risky_names)}")
+            output.append(f"RISKY: {', '.join(risky_names)}")
         if normal_names:
-            file_output.append(f"Other: {', '.join(normal_names)}")
-        file_output.append("-" * 70)
+            output.append(f"Other: {', '.join(normal_names)}")
+        output.append("-" * 70)
 
-        for func in funcs:
-            body, start, end = extract_function_lines(func['file'], func['start'])
+        # Sort by line number within file
+        for func, body, start, end in sorted(funcs, key=lambda x: x[2]):
             marker = " [RISKY]" if func['is_risky'] else ""
-            file_output.append(f"\n// Lines {start}-{end}: {func['name']}{marker} (depth={func['depth']})")
-            file_output.append(body)
-            total_lines += end - start
-            included_funcs += 1
-
-        file_text = '\n'.join(file_output)
-
-        # Check size limit
-        if current_size + len(file_text) > MAX_OUTPUT_SIZE:
-            skipped_funcs += len(funcs)
-            continue
-
-        output.extend(file_output)
-        current_size += len(file_text)
+            output.append(f"\n// Lines {start}-{end}: {func['name']}{marker} (depth={func['depth']})")
+            output.append(body)
 
     output.append("")
     output.append("=" * 70)

@@ -554,7 +554,7 @@ Examples:
                         help="Script directory path")
     parser.add_argument("--agent-output", default="agent_output",
                         help="Base directory for agent output")
-    parser.add_argument("--slice-context-dir", default="/tmp/slice_contexts",
+    parser.add_argument("--slice-context-dir", default=None,
                         help="Directory containing pre-computed slice context files (for e2e mode)")
     parser.add_argument("--default-build-image",
                         default="gcr.io/oss-fuzz-base/base-builder@sha256:8eda74a11e800aead5a041ee479a65b33dab3150d6e89e5694e2b6eb27be98fc")

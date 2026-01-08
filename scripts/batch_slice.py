@@ -9,7 +9,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SCRIPT_DIR = Path(__file__).parent
-TASKS_FILE = SCRIPT_DIR / "tasks_30.txt"
+TASKS_FILE = SCRIPT_DIR / "tasks_30_small.txt"
 OUTPUT_DIR = Path("/tmp/codeql_slices")
 CONTEXT_DIR = Path("/tmp/slice_contexts")
 
