@@ -52,17 +52,11 @@ The agent must produce:
 - `/output/fix.patch` - patch in git diff format
 
 ```bash
-cd /path/to/e2e-cyber-bench
-
-# End-to-end mode: agent finds vulnerability, creates PoC and patch
+# Single task (e2e mode)
 python3 scripts/run_agent.py <task> --mode e2e --max-attempts 3
 
-# Patch-only mode: agent receives crash.log + poc.bin, creates patch only
+# Single task (patch-only mode: agent receives crash.log + poc.bin)
 python3 scripts/run_agent.py <task> --mode patch-only --max-attempts 3
-
-# Specify model
-python3 scripts/run_agent.py <task> --mode e2e --max-attempts 3 \
-  --bedrock-model-id us.anthropic.claude-sonnet-4-5-20250929-v1:0
 
 # Batch run
 MODE=e2e MAX_ATTEMPTS=3 MAX_PARALLEL=2 \
