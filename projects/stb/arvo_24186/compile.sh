@@ -12,4 +12,6 @@ export ARCHITECTURE=x86_64
 export FUZZING_LANGUAGE=c++
 
 cd $SRC/stb
+# Fix unzip prompts in ossfuzz.sh (add -o flag to overwrite without prompting)
+sed -i 's/unzip /unzip -o /g' $SRC/stb/tests/ossfuzz.sh
 compile

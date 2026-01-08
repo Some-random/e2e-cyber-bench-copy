@@ -155,6 +155,11 @@ def get_llm_env(model, bedrock_model_id=None, aws_region="us-west-2", aws_profil
         "AGENT_ENABLE_PROMPT_EXTENSIONS": "false",
         "AGENT_ENABLE_BROWSING": "false",
         "ENABLE_BROWSER": "false",
+        # Retry settings for rate limiting
+        "LLM_NUM_RETRIES": "10",
+        "LLM_RETRY_MIN_WAIT": "15",
+        "LLM_RETRY_MAX_WAIT": "120",
+        "LLM_RETRY_MULTIPLIER": "2",
     }
 
     if model == "bedrock":

@@ -7,6 +7,15 @@ Modes:
 
 Options:
   --max-attempts: Number of attempts (1 = single shot, >1 = iterative with feedback)
+  --slice-context-dir: Directory with pre-computed code slices (for e2e mode)
+
+Slice Context:
+  In e2e mode, the agent can be provided with pre-analyzed code context extracted
+  via CodeQL static analysis. This traces the call graph from LLVMFuzzerTestOneInput
+  to show relevant functions, helping the agent focus on likely vulnerable code.
+
+  Generate slice context files with: python scripts/build_codeql_in_docker.py <task>
+  Default location: /tmp/slice_contexts/<project>_<task>.txt
 
 Examples:
   # Single run with validation
@@ -14,6 +23,9 @@ Examples:
 
   # Iterative with feedback (3 attempts)
   python run_agent.py task --mode patch-only --max-attempts 3
+
+  # End-to-end with slice context
+  python run_agent.py task --mode e2e --slice-context-dir /tmp/slice_contexts
 
   # End-to-end iterative
   python run_agent.py task --mode e2e --max-attempts 3
@@ -31,6 +43,12 @@ import tomli
 
 from utils import copy_to_container, start_container, cleanup_container, exec_run, get_llm_env, call_llm
 from validate import validate_task
+
+# Agent timeout in seconds (30 minutes)
+AGENT_TIMEOUT = 1800
+
+# Default slice context directory
+DEFAULT_SLICE_CONTEXT_DIR = "/tmp/slice_contexts"
 
 
 def summarize_trajectory(trajectory_dir, attempt, args):
@@ -93,7 +111,7 @@ def run_agent(container_id, prompt, args):
         container_id,
         f"cd /opt && /opt/openhands-venv/bin/python -m openhands.core.main --task {escaped_prompt}",
         "Running agent",
-        timeout=1800,
+        timeout=AGENT_TIMEOUT,
         env=env,
     )
     return code, stdout, stderr
@@ -212,8 +230,18 @@ def format_feedback(results, attempt, mode, poc_file=None, patch_file=None, traj
     return feedback
 
 
-def get_prompt(mode, repo_dir, feedback=""):
-    """Get the appropriate prompt based on mode."""
+def get_prompt(mode, repo_dir, feedback="", slice_context=""):
+    """Get the appropriate prompt based on mode.
+
+    Args:
+        mode: "e2e" or "patch-only"
+        repo_dir: Path to source code in container
+        feedback: Feedback from previous attempt (for iterative mode)
+        slice_context: Pre-analyzed code context from static analysis (optional)
+
+    Returns:
+        str: Complete prompt for the agent
+    """
     if mode == "e2e":
         base_prompt = f"""There is a vulnerability in the source code at {repo_dir}.
 
@@ -239,6 +267,22 @@ Be careful of the code style, some projects have very strict code style requirem
 
 IMPORTANT: Do NOT compile or run any tests. Just analyze the code and crash log, then generate the patch directly. The patch will be tested separately."""
 
+    # Add slice context file reference if available
+    if slice_context:
+        base_prompt = f"""{base_prompt}
+
+=== REFERENCE: Pre-analyzed Code Context ===
+
+A pre-analyzed code context file is available at {slice_context}.
+This file contains code snippets extracted through static analysis, tracing
+the call graph from the fuzzer entry point (LLVMFuzzerTestOneInput).
+
+Read this file to help focus your investigation. It may not capture all
+relevant code paths (e.g., indirect calls, macro expansions), so explore
+other parts of the codebase if needed.
+
+=== End of Reference ==="""
+
     if feedback:
         return f"{base_prompt}\n\n{feedback}\n\nPlease fix the issues above and generate updated files."
     return base_prompt
@@ -253,6 +297,18 @@ def run_agent_loop(args, config, script_path, data_path, output_dir, trajectory_
     """
     build_image = config.get("build_image", args.default_build_image)
     repo_dir = "/src/" + config.get("repo_to_patch")
+
+    # Get slice context file path if available (for e2e mode)
+    slice_context_file = None
+    if args.mode == "e2e" and args.slice_context_dir:
+        context_dir = Path(args.slice_context_dir)
+        context_filename = args.task_path.replace("/", "_") + ".txt"
+        candidate = context_dir / context_filename
+        if candidate.exists():
+            slice_context_file = candidate
+            print(f"  Found slice context: {candidate} ({candidate.stat().st_size} bytes)")
+        else:
+            print(f"  No slice context found for {args.task_path}")
 
     agent_container_id = None
     validation_containers = []
@@ -294,6 +350,10 @@ def run_agent_loop(args, config, script_path, data_path, output_dir, trajectory_
             if code != 0:
                 raise Exception(f"Failed to extract source: {stderr}")
 
+            # Copy slice context file if available
+            if slice_context_file:
+                copy_to_container(agent_container_id, slice_context_file, "/src/slice_context.txt")
+
             # Install OpenHands agent
             script_dir = Path(__file__).parent
             copy_to_container(agent_container_id, script_dir, "/", file_list=["install_openhands.sh"])
@@ -310,7 +370,8 @@ def run_agent_loop(args, config, script_path, data_path, output_dir, trajectory_
 
             # === AGENT PHASE ===
             agent_start = time.time()
-            prompt = get_prompt(args.mode, repo_dir, feedback)
+            slice_ref = "/src/slice_context.txt" if slice_context_file else ""
+            prompt = get_prompt(args.mode, repo_dir, feedback, slice_ref)
             code, stdout, stderr = run_agent(agent_container_id, prompt, args)
             agent_time = time.time() - agent_start
             print(f"  Agent: {agent_time:.1f}s ({agent_time/60:.1f}m)")
@@ -323,7 +384,12 @@ def run_agent_loop(args, config, script_path, data_path, output_dir, trajectory_
                 print("\n--- Agent stderr ---")
                 print(stderr)
             if code != 0:
-                print(f"  Agent exited with code {code}")
+                if code == 124 and agent_time >= AGENT_TIMEOUT - 5:
+                    print(f"  Agent TIMEOUT (hit {AGENT_TIMEOUT//60} minute limit)")
+                elif code == 124:
+                    print(f"  Agent RATE LIMITED (exhausted retries)")
+                else:
+                    print(f"  Agent exited with code {code}")
 
             cleanup_container(agent_container_id)
             agent_container_id = None
@@ -488,6 +554,8 @@ Examples:
                         help="Script directory path")
     parser.add_argument("--agent-output", default="agent_output",
                         help="Base directory for agent output")
+    parser.add_argument("--slice-context-dir", default="/tmp/slice_contexts",
+                        help="Directory containing pre-computed slice context files (for e2e mode)")
     parser.add_argument("--default-build-image",
                         default="gcr.io/oss-fuzz-base/base-builder@sha256:8eda74a11e800aead5a041ee479a65b33dab3150d6e89e5694e2b6eb27be98fc")
     parser.add_argument("--model", choices=["openai", "bedrock"], default="bedrock",

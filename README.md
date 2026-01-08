@@ -68,6 +68,42 @@ MODE=e2e MAX_ATTEMPTS=3 MAX_PARALLEL=2 \
 
 # Or use command line args
 bash scripts/batch_run.sh --mode e2e --max-attempts 3 --max-parallel 2
+
+# Stop all running batch processes and containers
+bash scripts/batch_run.sh --stop
+```
+
+### Program Slicing (Experimental)
+
+**Motivation:** Large codebases (100K+ lines) are expensive and ineffective to analyze in one shot. Our approach is **divide and conquer**: extract small, relevant code slices and have the agent analyze each slice independently. By running many focused analyses instead of one massive analysis, we keep per-run costs manageable while achieving broader coverage.
+
+**Current Implementation (Temporary):**
+This is a testing solution that uses `LLVMFuzzerTestOneInput` as the sole entry point. It extracts functions reachable within 3 call levels, prioritizing risky operations (memory manipulation, parsing, buffer handling).
+
+**Future Plan:**
+The complete implementation will use **all public API functions** as entry points, generating multiple slice contexts per project. Each slice will be analyzed independently, enabling systematic coverage of the entire attack surface.
+
+**Generate slice contexts:**
+```bash
+# Single task
+python3 scripts/build_codeql_in_docker.py --task curl/arvo_66012 --output-dir /tmp/codeql_slices
+
+# Batch (parallel)
+python3 scripts/batch_slice.py 8  # 8 parallel workers
+```
+
+**Use slice contexts with agent:**
+```bash
+# With slice context
+python3 scripts/run_agent.py curl/arvo_66012 --mode e2e \
+  --slice-context-dir /tmp/slice_contexts
+
+# Batch with slice context
+bash scripts/batch_run.sh --tasks scripts/tasks_30.txt \
+  --slice-context-dir /tmp/slice_contexts
+
+# Disable slice context
+bash scripts/batch_run.sh --tasks scripts/tasks_30.txt --no-slice-context
 ```
 
 ## Validation

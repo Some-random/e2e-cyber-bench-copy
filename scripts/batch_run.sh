@@ -1,63 +1,104 @@
 #!/bin/bash
 
-# Batch run agent on multiple tasks
-# Usage: ./scripts/batch_run.sh [--mode patch-only|e2e] [--max-attempts N]
+# Batch run agent on multiple tasks in parallel
+# Usage: ./scripts/batch_run.sh --tasks FILE [OPTIONS]
+#
+# Options:
+#   --tasks FILE              Task list file (required)
+#   --mode patch-only|e2e     Mode (default: e2e)
+#   --max-attempts N          Retry attempts (default: 3)
+#   --max-parallel N          Parallel jobs (default: 2)
+#   --model MODEL_ID          Bedrock model ID
+#   --aws-profile PROFILE     AWS profile for credentials (default: bedrock-profile)
+#   --slice-context-dir DIR   Pre-computed code slices (default: /tmp/slice_contexts)
+#   --no-slice-context        Disable slice context
+#   --stop                    Kill all running batch processes and containers
+#
+# Examples:
+#   ./scripts/batch_run.sh --tasks scripts/tasks_30.txt --max-parallel 4
+#   ./scripts/batch_run.sh --tasks scripts/tasks_30.txt --aws-profile default
+#   ./scripts/batch_run.sh --stop   # Kill all running batch jobs
 
-TASKS=(
-    "capstone/arvo_13466"
-    "capstone/arvo_13467"
-    "capstone/arvo_14912"
-    "capstone/arvo_58666"
-    "curl/arvo_66012"
-    "faad2/arvo_58287"
-    "flatbuffers/arvo_46883"
-    "fluent-bit/arvo_26325"
-    "fluent-bit/arvo_26327"
-    "fluent-bit/arvo_26345"
-    "fluent-bit/arvo_26593"
-    "fluent-bit/arvo_27025"
-    "fluent-bit/arvo_27241"
-    "fluent-bit/arvo_27279"
-    "fluent-bit/arvo_27710"
-    "fluent-bit/arvo_28265"
-    "fluent-bit/arvo_30090"
-    "fluent-bit/arvo_33750"
-    "fluent-bit/arvo_34116"
-    "fluent-bit/arvo_45879"
-    "fluent-bit/arvo_46082"
-    "fluent-bit/arvo_51132"
-    "hiredis/arvo_28777"
-    "libidn2/arvo_12420"
-    "libpcap/arvo_48863"
-    "libssh2/arvo_29769"
-    "libssh2/arvo_65212"
-    "md4c/arvo_31332"
-    "skcms/arvo_6521"
-    "wasm3/arvo_33318"
-)
+# Handle --stop first (before other parsing)
+if [[ "$1" == "--stop" ]]; then
+    echo "Stopping all batch_run processes..."
+
+    # Kill batch_run.sh processes (except this one)
+    pkill -9 -f "batch_run.sh --tasks" 2>/dev/null
+
+    # Kill run_agent.py processes
+    pkill -9 -f "run_agent.py" 2>/dev/null
+
+    # Kill docker exec processes
+    pkill -9 -f "docker exec" 2>/dev/null
+
+    # Stop all running containers
+    CONTAINERS=$(docker ps -q 2>/dev/null)
+    if [ -n "$CONTAINERS" ]; then
+        echo "Stopping $(echo "$CONTAINERS" | wc -l) containers..."
+        docker kill $CONTAINERS 2>/dev/null
+    fi
+
+    # Clean up temp files
+    rm -f /tmp/batch_*.log /tmp/batch_*.rundir 2>/dev/null
+
+    echo "Done. All batch processes stopped."
+    exit 0
+fi
 
 # Defaults
 MODE=${MODE:-"e2e"}
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-3}
 MAX_PARALLEL=${MAX_PARALLEL:-2}
-MAX_RETRIES=${MAX_RETRIES:-2}
-RETRY_DELAY=${RETRY_DELAY:-60}
 STAGGER_DELAY=${STAGGER_DELAY:-10}
 MODEL_ID=${MODEL_ID:-"us.anthropic.claude-sonnet-4-5-20250929-v1:0"}
+AWS_PROFILE_ARG=${AWS_PROFILE:-"bedrock-profile"}
+SLICE_CONTEXT_DIR=${SLICE_CONTEXT_DIR:-"/tmp/slice_contexts"}
+TASK_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --tasks) TASK_FILE="$2"; shift 2 ;;
         --mode) MODE="$2"; shift 2 ;;
         --max-attempts) MAX_ATTEMPTS="$2"; shift 2 ;;
         --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
         --model) MODEL_ID="$2"; shift 2 ;;
+        --aws-profile) AWS_PROFILE_ARG="$2"; shift 2 ;;
+        --slice-context-dir) SLICE_CONTEXT_DIR="$2"; shift 2 ;;
+        --no-slice-context) SLICE_CONTEXT_DIR=""; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
+# Load tasks from file or use default
+TASKS=()
+if [ -n "$TASK_FILE" ]; then
+    if [ ! -f "$TASK_FILE" ]; then
+        echo "ERROR: Task file not found: $TASK_FILE"
+        exit 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        TASKS+=("$line")
+    done < "$TASK_FILE"
+    echo "Loaded ${#TASKS[@]} tasks from $TASK_FILE"
+else
+    echo "ERROR: No task file specified. Use --tasks FILE"
+    echo "Example: $0 --tasks scripts/all_tasks.txt"
+    exit 1
+fi
+
+if [ ${#TASKS[@]} -eq 0 ]; then
+    echo "ERROR: No tasks to run"
+    exit 1
+fi
+
 echo "========================================"
 echo "Mode: $MODE | Attempts: $MAX_ATTEMPTS | Parallel: $MAX_PARALLEL"
 echo "Model: $MODEL_ID"
+echo "AWS Profile: $AWS_PROFILE_ARG"
+echo "Slice context: ${SLICE_CONTEXT_DIR:-disabled}"
 echo "Tasks: ${#TASKS[@]}"
 echo "========================================"
 
@@ -72,10 +113,17 @@ run_task() {
     echo "[$task] Starting..."
 
     # Run and capture the run directory from output
+    SLICE_ARG=""
+    if [ -n "$SLICE_CONTEXT_DIR" ]; then
+        SLICE_ARG="--slice-context-dir $SLICE_CONTEXT_DIR"
+    fi
+
     python3 scripts/run_agent.py \
         --mode "$MODE" \
         --max-attempts "$MAX_ATTEMPTS" \
         --bedrock-model-id "$MODEL_ID" \
+        --aws-profile "$AWS_PROFILE_ARG" \
+        $SLICE_ARG \
         "$task" > "$tmp_log" 2>&1
 
     # Extract run directory from the output (look for "Output:" line)
