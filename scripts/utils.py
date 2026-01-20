@@ -6,9 +6,64 @@ Docker container management, LLM configuration, and common operations.
 
 import subprocess
 import os
+import shutil
 from pathlib import Path
 
 import boto3
+
+
+def get_poc_hex_dump(poc_file, max_bytes=200):
+    """Get hex dump of PoC file for feedback."""
+    try:
+        with open(poc_file, "rb") as f:
+            data = f.read(max_bytes)
+        hex_lines = []
+        for i in range(0, len(data), 16):
+            chunk = data[i : i + 16]
+            hex_part = " ".join(f"{b:02x}" for b in chunk)
+            ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+            hex_lines.append(f"{i:04x}: {hex_part:<48} {ascii_part}")
+        size = Path(poc_file).stat().st_size
+        result = "\n".join(hex_lines)
+        if size > max_bytes:
+            result += f"\n... ({size} bytes total, showing first {max_bytes})"
+        return result
+    except Exception as e:
+        return f"Error reading PoC: {e}"
+
+
+def get_aws_credentials(profile):
+    """Get AWS credentials from profile for use in Docker."""
+    try:
+        session = boto3.Session(profile_name=profile)
+        credentials = session.get_credentials()
+        if credentials:
+            frozen = credentials.get_frozen_credentials()
+            return {
+                "AWS_ACCESS_KEY_ID": frozen.access_key,
+                "AWS_SECRET_ACCESS_KEY": frozen.secret_key,
+                "AWS_SESSION_TOKEN": frozen.token if frozen.token else "",
+            }
+    except Exception as e:
+        print(f"  Warning: Could not get AWS credentials: {e}")
+    return {}
+
+
+def create_filtered_data_dir(data_dir, task_path, work_dir):
+    """Create a filtered data directory with only src.tgz (no poc.bin or crash.log).
+
+    This prevents the agent from "cheating" by looking at the ground truth PoC.
+    """
+    filtered_dir = Path(work_dir) / ".filtered_data"
+    task_data_dir = filtered_dir / task_path
+    task_data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy only src.tgz (the source code), not poc.bin or crash.log
+    src_tgz = Path(data_dir) / task_path / "src.tgz"
+    if src_tgz.exists():
+        shutil.copy(src_tgz, task_data_dir / "src.tgz")
+
+    return str(filtered_dir.absolute())
 
 
 def copy_to_container(container_id, src_path, dst_path, file_list=None):
@@ -65,7 +120,7 @@ def cleanup_container(container_id):
         subprocess.run(["docker", "rm", "-f", container_id], check=False, capture_output=True)
 
 
-def exec_run(container_id, command, description=None, timeout=600, env=None, verbose=True):
+def exec_run(container_id, command, description=None, timeout=1200, env=None, verbose=True):
     """
     Execute command in container.
 
